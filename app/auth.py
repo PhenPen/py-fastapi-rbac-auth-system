@@ -379,4 +379,3 @@ async def logout(db: AsyncSession, raw_refresh_token: str) -> None:
     if db_token and not db_token.is_revoked:
         db_token.revoke(RevokeReasonEnum.logout)
         await db.commit()
-
