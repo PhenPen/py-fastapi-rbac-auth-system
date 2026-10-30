@@ -12,8 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.contracts import LoginRequest, TokenPair, UserCreate
 from app.hash import hash_password, verify_password
-from app.models import RefreshToken, RevokeReasonEnum, User
+from app.models import RefreshToken, RevokeReasonEnum, Role as DbRole, User
 from app.redis_store import token_store
+from app.roles import Role
 from app.tokens import (
     generate_token,
     get_last_verification_token,
@@ -113,10 +114,19 @@ async def create_new_user(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered"
         )
 
+        # Load the default role (seeded by the migration)
+    default_role = await db.scalar(select(DbRole).where(DbRole.name == Role.USER.value))
+    if default_role is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Default role is not configured",
+        )
+
     new_user = User(
         email=user.email,
         password_hash=hash_password(user.password),
         is_verified=False,
+        roles=[default_role],
     )
 
     db.add(new_user)
