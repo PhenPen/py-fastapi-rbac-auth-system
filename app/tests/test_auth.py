@@ -17,7 +17,8 @@ from app.auth import (
     refresh_token,
 )
 from app.contracts import LoginRequest, UserCreate
-from app.models import RefreshToken, RevokeReasonEnum
+from app.models import RefreshToken, RevokeReasonEnum, Role as DbRole, User, UserRole
+from app.roles import Role as AppRole
 from app.tokens import generate_token, validate_token
 
 
@@ -271,9 +272,7 @@ async def test_logout_revokes_token(db_session, redis_client):
     assert raw_redis_session_after is None
 
     result = await db_session.execute(
-        select(RefreshToken).where(
-            RefreshToken.token_hash == token_hash
-        )
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
     )
     row = result.scalars().one()
     assert row.is_revoked is True
@@ -291,6 +290,9 @@ async def test_redis_user_session_revocation_on_token_reuse(db_session, redis_cl
     # First rotation succeeds
     rotated = await refresh_token(db_session, tokens.refresh_token, make_request())
 
+    assert rotated.access_token
+    assert rotated.refresh_token != tokens.refresh_token
+
     # Replaying old token triggers token reuse protection via Redis
     with pytest.raises(HTTPException) as exc:
         await refresh_token(db_session, tokens.refresh_token, make_request())
@@ -304,3 +306,18 @@ async def test_redis_user_session_revocation_on_token_reuse(db_session, redis_cl
     revoked_at = await redis_client.get(f"user_revoked_at:{user.id}")
     assert revoked_at is not None
 
+
+@pytest.mark.asyncio
+async def test_create_new_user_assigns_user_role(db_session):
+    await _make_user(db_session, email="role@example.com", verified=False)
+
+    role_names = (
+        await db_session.scalars(
+            select(DbRole.name)
+            .join(UserRole, UserRole.role_id == DbRole.id)
+            .join(User, User.id == UserRole.user_id)
+            .where(User.email == "role@example.com")
+        )
+    ).all()
+
+    assert set(role_names) == {AppRole.USER.value}
