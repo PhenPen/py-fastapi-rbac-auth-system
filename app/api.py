@@ -1,12 +1,23 @@
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.contracts as contracts
 from app.auth import create_new_user, login, logout, refresh_token
+from app.bootstrap import ensure_admin
+from app.config import BootstrapMode, settings
 from app.database import get_db
 from app.guards import RolesGuard
 from app.models import User
@@ -32,6 +43,46 @@ async def create_user(
 ):
     host_url = str(request.base_url) if request else None
     return await create_new_user(db, user, host_url=host_url)
+
+
+@router.post(
+    "/bootstrap",
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+async def bootstrap_admin(
+    payload: contracts.UserCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_bootstrap_token: Annotated[str | None, Header()] = None,
+):
+    """Create the first ADMIN when BOOTSTRAP_MODE=http in config.
+
+    Only ever creates the first admin: once one exists every call returns 409,
+    so a leaked token cannot mint more accounts.
+    """
+    if settings.BOOTSTRAP_MODE is not BootstrapMode.HTTP:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+    token = settings.BOOTSTRAP_TOKEN
+    if (
+        not token
+        or not x_bootstrap_token
+        or not secrets.compare_digest(
+            x_bootstrap_token.encode("utf-8"), token.encode("utf-8")
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bootstrap token",
+        )
+
+    if not await ensure_admin(db, payload.email, payload.password):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An admin already exists",
+        )
+
+    return {"message": "Admin created"}
 
 
 @router.get("/admin/dashboard", tags=["Admin"])
