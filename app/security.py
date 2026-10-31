@@ -3,14 +3,13 @@ Minimal JWT access-token handling.
 
 `get_current_user` is the FastAPI equivalent of Nest's Passport JWT
 strategy attaching a validated payload to `request.user`: it decodes the
-bearer token and trusts the claims inside it (id + role) rather than
+bearer token and trusts the claims inside it (id + roles) rather than
 re-querying the database on every request. This keeps `RolesGuard` cheap
 and DB-free.
 
-NOTE: token *issuance* (login) is intentionally out of scope here — that's
-tracked separately in the roadmap. `create_access_token` exists so this
-module is self-contained and testable; wire it into a real `/login`
-endpoint once that lands.
+NOTE: create_access_token is the single issuer for access tokens; auth calls it
+on login and refresh so the claims can never drift from what this module
+verifies.
 """
 
 import uuid
@@ -42,6 +41,7 @@ def create_access_token(user_id: uuid.UUID, roles: list[Role]) -> str:
     payload = {
         "sub": str(user_id),
         "roles": [role.value for role in roles],
+        "type": "access",
         "iat": int(now.timestamp()),
         "exp": expire,
         "jti": str(uuid.uuid4()),
@@ -66,6 +66,14 @@ async def get_current_user(
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
         )
+
+        if payload.get("type") != "access":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         user_id = str(payload["sub"])
         iat = int(payload.get("iat", 0))
         jti = payload.get("jti")

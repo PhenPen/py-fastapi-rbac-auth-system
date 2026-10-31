@@ -4,7 +4,6 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import jwt
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,16 +11,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.contracts import LoginRequest, TokenPair, UserCreate
 from app.hash import hash_password, verify_password
-from app.models import RefreshToken, RevokeReasonEnum, Role as DbRole, User
+from app.models import (
+    RefreshToken,
+    RevokeReasonEnum,
+    Role as DbRole,
+    User,
+    UserRole,
+)
 from app.redis_store import token_store
 from app.roles import Role
+from app.security import create_access_token
 from app.tokens import (
     generate_token,
     get_last_verification_token,
     send_email_verification,
 )
 
-ACCESS_TOKEN_LIFETIME = timedelta(minutes=15)
 REFRESH_TOKEN_LIFETIME = timedelta(days=7)
 
 
@@ -35,20 +40,6 @@ def _unauthorized() -> HTTPException:
 
 def _hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _create_access_token(user_id: uuid.UUID) -> str:
-    now = datetime.now(UTC)
-    payload = {
-        "user": str(user_id),
-        "type": "access",
-        "jti": str(uuid.uuid4()),
-        "iat": int(now.timestamp()),
-        "exp": int((now + ACCESS_TOKEN_LIFETIME).timestamp()),
-    }
-    return jwt.encode(
-        payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
-    )
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -98,8 +89,18 @@ async def _issue_token_pair(
         ttl_seconds=int(REFRESH_TOKEN_LIFETIME.total_seconds()),
     )
 
+    role_names = (
+        await db.scalars(
+            select(DbRole.name)
+            .join(UserRole, UserRole.role_id == DbRole.id)
+            .where(UserRole.user_id == user.id)
+        )
+    ).all()
+
     return TokenPair(
-        access_token=_create_access_token(user.id), refresh_token=raw_refresh_token
+        access_token=create_access_token(user.id, [Role(name) for name in role_names]),
+        refresh_token=raw_refresh_token,
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
 
 

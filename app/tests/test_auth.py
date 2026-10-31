@@ -9,16 +9,17 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.auth import (
-    _create_access_token,
     _hash_refresh_token,
     create_new_user,
     login,
     logout,
     refresh_token,
 )
+from app.config import settings
 from app.contracts import LoginRequest, UserCreate
 from app.models import RefreshToken, RevokeReasonEnum, Role as DbRole, User, UserRole
 from app.roles import Role as AppRole
+from app.security import create_access_token
 from app.tokens import generate_token, validate_token
 
 
@@ -30,20 +31,23 @@ def make_request():
 
 
 def test_create_access_token_is_three_part_jwt():
-    token = _create_access_token(uuid.uuid4())
+    token = create_access_token(uuid.uuid4(), [AppRole.ADMIN])
     assert len(token.split(".")) == 3
 
 
 def test_create_access_token_claims():
     uid = uuid.uuid4()
-    token = _create_access_token(uid)
+    token = create_access_token(uid, [AppRole.ADMIN, AppRole.USER])
     payload = json.loads(
         base64.urlsafe_b64decode(token.split(".")[1] + "==").decode("utf-8")
     )
-    assert payload["user"] == str(uid)
+    assert payload["sub"] == str(uid)
+    assert payload["roles"] == ["ADMIN", "USER"]
     assert payload["type"] == "access"
     assert "jti" in payload
-    assert payload["exp"] - payload["iat"] == 15 * 60
+    assert payload["exp"] - payload["iat"] == (
+        settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
 
 
 def test_hash_refresh_token_is_deterministic_sha256():
