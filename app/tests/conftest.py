@@ -19,7 +19,7 @@ from app.roles import Role as AppRole
 # points at. conftest swaps the database name in DATABASE_URL and creates the
 # database on the fly, so the `drop_all`/`create_all` cycle below can't destroy
 # local data.
-TEST_DATABASE_NAME = "fastapi_db_test"
+TEST_DATABASE_NAME = "RBAC_db_test"
 
 
 def _test_database_url() -> str:
