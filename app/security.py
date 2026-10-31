@@ -41,7 +41,7 @@ def create_access_token(user_id: uuid.UUID, roles: list[Role]) -> str:
     expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": str(user_id),
-        "role": [role.value for role in roles],
+        "roles": [role.value for role in roles],
         "iat": int(now.timestamp()),
         "exp": expire,
         "jti": str(uuid.uuid4()),
