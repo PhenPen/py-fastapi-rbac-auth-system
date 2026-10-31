@@ -31,13 +31,18 @@ async def _create_verified_user(db, email: str, role: AppRole):
     return user
 
 
-def _login(client, email: str) -> dict[str, str]:
+def _login_response(client, email: str) -> dict:
     response = client.post(
         f"{settings.API_V1_STR}/auth/login",
         json={"email": email, "password": PASSWORD},
     )
     assert response.status_code == 200, response.text
-    return {"Authorization": f"Bearer {response.json()['accessToken']}"}
+    return response.json()
+
+
+def _login(client, email: str) -> dict[str, str]:
+    access = _login_response(client, email)["accessToken"]
+    return {"Authorization": f"Bearer {access}"}
 
 
 @pytest.mark.asyncio
@@ -93,3 +98,40 @@ async def test_member_login_token_is_forbidden(client, db_session):
         headers=headers,
     )
     assert created.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logout_revokes_the_access_token(client, db_session):
+    await _create_verified_user(db_session, "admin@example.com", AppRole.ADMIN)
+    tokens = _login_response(client, "admin@example.com")
+    headers = {"Authorization": f"Bearer {tokens['accessToken']}"}
+    dashboard = f"{settings.API_V1_STR}/admin/dashboard"
+
+    assert client.get(dashboard, headers=headers).status_code == 200
+
+    out = client.post(
+        f"{settings.API_V1_STR}/auth/logout",
+        json={"refreshToken": tokens["refreshToken"]},
+        headers=headers,
+    )
+    assert out.status_code == 204
+
+    assert client.get(dashboard, headers=headers).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_without_access_token_still_revokes_refresh(client, db_session):
+    await _create_verified_user(db_session, "admin@example.com", AppRole.ADMIN)
+    tokens = _login_response(client, "admin@example.com")
+
+    out = client.post(
+        f"{settings.API_V1_STR}/auth/logout",
+        json={"refreshToken": tokens["refreshToken"]},
+    )
+    assert out.status_code == 204
+
+    replay = client.post(
+        f"{settings.API_V1_STR}/auth/refresh",
+        json={"refreshToken": tokens["refreshToken"]},
+    )
+    assert replay.status_code == 401

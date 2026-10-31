@@ -4,6 +4,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import jwt
 from fastapi import HTTPException, Request, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,7 @@ from app.models import (
 )
 from app.redis_store import token_store
 from app.roles import Role
-from app.security import create_access_token
+from app.security import create_access_token, decode_access_token
 from app.tokens import (
     generate_token,
     get_last_verification_token,
@@ -361,6 +362,22 @@ async def refresh_token(
     )
     await db.commit()
     return tokens
+
+
+async def revoke_access_token(access_token: str) -> None:
+    """Blocklist one access token so it stops working before it expires."""
+    try:
+        payload = decode_access_token(access_token)
+    except jwt.PyJWTError:
+        return  # already expired or invalid: nothing left to revoke
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if not jti or not exp:
+        return  # nothing identifiable to revoke
+
+    ttl = max(int(exp - datetime.now(UTC).timestamp()), 1)
+    await token_store.revoke_access_token(jti, ttl)
 
 
 async def logout(db: AsyncSession, raw_refresh_token: str) -> None:

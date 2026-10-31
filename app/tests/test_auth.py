@@ -4,6 +4,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.auth import (
     login,
     logout,
     refresh_token,
+    revoke_access_token,
 )
 from app.config import settings
 from app.contracts import LoginRequest, UserCreate
@@ -61,6 +63,23 @@ def test_generate_and_validate_token():
     payload = validate_token(token)
     assert payload["user"] == str(uid)
     assert payload["type"] == "email_verification"
+
+
+@pytest.mark.asyncio
+async def test_revoke_access_token_ignores_token_without_jti(redis_client):
+    token = jwt.encode(
+        {
+            "sub": str(uuid.uuid4()),
+            "type": "access",
+            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
+        },
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+    await revoke_access_token(token)
+
+    assert await redis_client.keys("revoked_jti:*") == []
 
 
 # --- DB-backed auth flows ---

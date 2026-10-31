@@ -12,17 +12,24 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.contracts as contracts
-from app.auth import create_new_user, login, logout, refresh_token
+from app.auth import (
+    create_new_user,
+    login,
+    logout,
+    refresh_token,
+    revoke_access_token,
+)
 from app.bootstrap import ensure_admin
 from app.config import BootstrapMode, settings
 from app.database import get_db
 from app.guards import RolesGuard
 from app.models import User
 from app.roles import Role, Roles
-from app.security import CurrentUser
+from app.security import CurrentUser, bearer_scheme
 from app.tokens import validate_token
 
 router = APIRouter()
@@ -125,7 +132,12 @@ async def refresh_user_token(
 async def logout_user(
     payload: contracts.RefreshTokenRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(bearer_scheme)
+    ] = None,
 ) -> Response:
+    if credentials is not None:
+        await revoke_access_token(credentials.credentials)
     await logout(db, payload.refresh_token)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

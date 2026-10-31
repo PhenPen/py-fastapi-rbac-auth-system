@@ -51,6 +51,13 @@ def create_access_token(user_id: uuid.UUID, roles: list[Role]) -> str:
     )
 
 
+def decode_access_token(token: str) -> dict:
+    """Decode an access token, raising `jwt.PyJWTError` if it is not valid."""
+    return jwt.decode(
+        token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+    )
+
+
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> CurrentUser:
@@ -61,11 +68,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-        )
+        payload = decode_access_token(credentials.credentials)
 
         if payload.get("type") != "access":
             raise HTTPException(
