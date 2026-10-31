@@ -52,6 +52,21 @@ def _request_metadata(request: Request) -> tuple[str | None, str | None]:
     return client_ip, request.headers.get("user-agent")
 
 
+async def get_user_role_names(db: AsyncSession, user_id: uuid.UUID) -> list[str]:
+    """Return a user's role names.
+
+    Queries instead of reading user.roles: lazy-loading a relationship on an
+    async session raises MissingGreenlet.
+    """
+    result = await db.scalars(
+        select(DbRole.name)
+        .join(UserRole, UserRole.role_id == DbRole.id)
+        .where(UserRole.user_id == user_id)
+        .order_by(DbRole.name)
+    )
+    return list(result.all())
+
+
 async def _issue_token_pair(
     db: AsyncSession,
     user: User,
@@ -90,13 +105,7 @@ async def _issue_token_pair(
         ttl_seconds=int(REFRESH_TOKEN_LIFETIME.total_seconds()),
     )
 
-    role_names = (
-        await db.scalars(
-            select(DbRole.name)
-            .join(UserRole, UserRole.role_id == DbRole.id)
-            .where(UserRole.user_id == user.id)
-        )
-    ).all()
+    role_names = await get_user_role_names(db, user.id)
 
     return TokenPair(
         access_token=create_access_token(user.id, [Role(name) for name in role_names]),
@@ -116,7 +125,7 @@ async def create_new_user(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Email already registered"
         )
 
-        # Load the default role (seeded by the migration)
+    # Load the default role (seeded by the migration)
     default_role = await db.scalar(select(DbRole).where(DbRole.name == Role.USER.value))
     if default_role is None:
         raise HTTPException(
@@ -270,6 +279,37 @@ async def login(
     return tokens
 
 
+async def revoke_all_sessions(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    reason: RevokeReasonEnum = RevokeReasonEnum.logout_all,
+) -> None:
+    """Revoke every session for a user in Redis and in refresh_tokens.
+
+    Redis goes first because it is what blocks requests: if the DB step fails,
+    the user is still locked out. Rows that are already revoked are left alone
+    so they keep their original reason and timestamp. Commits the session.
+    """
+    await token_store.revoke_user_sessions(
+        str(user_id),
+        access_token_ttl=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    await db.execute(
+        update(RefreshToken)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.is_revoked.is_(False),
+            RefreshToken.revoked_at.is_(None),
+        )
+        .values(
+            is_revoked=True,
+            revoked_at=datetime.now(UTC),
+            revoke_reason=reason,
+        )
+    )
+    await db.commit()
+
+
 async def refresh_token(
     db: AsyncSession, raw_refresh_token: str, request: Request
 ) -> TokenPair:
@@ -277,27 +317,15 @@ async def refresh_token(
 
     # 1. Reuse detection via Redis
     if await token_store.is_token_used(token_hash):
-        # A rotated token was presented again! Invalidate all Redis sessions for user.
+        # A rotated token was presented again! Invalidate all sessions for user.
         result = await db.execute(
             select(RefreshToken).where(RefreshToken.token_hash == token_hash)
         )
         db_token = result.scalars().first()
         if db_token:
-            await token_store.revoke_user_sessions(str(db_token.user_id))
-            await db.execute(
-                update(RefreshToken)
-                .where(
-                    RefreshToken.user_id == db_token.user_id,
-                    RefreshToken.is_revoked.is_(False),
-                    RefreshToken.revoked_at.is_(None),
-                )
-                .values(
-                    is_revoked=True,
-                    revoked_at=datetime.now(UTC),
-                    revoke_reason=RevokeReasonEnum.token_reuse,
-                )
+            await revoke_all_sessions(
+                db, db_token.user_id, RevokeReasonEnum.token_reuse
             )
-            await db.commit()
         raise _unauthorized()
 
     # 2. Retrieve session from Redis
@@ -309,21 +337,9 @@ async def refresh_token(
         )
         db_token = result.scalars().first()
         if db_token and (db_token.is_revoked or db_token.revoked_at is not None):
-            await token_store.revoke_user_sessions(str(db_token.user_id))
-            await db.execute(
-                update(RefreshToken)
-                .where(
-                    RefreshToken.user_id == db_token.user_id,
-                    RefreshToken.is_revoked.is_(False),
-                    RefreshToken.revoked_at.is_(None),
-                )
-                .values(
-                    is_revoked=True,
-                    revoked_at=datetime.now(UTC),
-                    revoke_reason=RevokeReasonEnum.token_reuse,
-                )
+            await revoke_all_sessions(
+                db, db_token.user_id, RevokeReasonEnum.token_reuse
             )
-            await db.commit()
         raise _unauthorized()
 
     user_id = uuid.UUID(session_data["user_id"])

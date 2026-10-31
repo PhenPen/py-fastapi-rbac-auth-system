@@ -16,6 +16,7 @@ from app.auth import (
     logout,
     refresh_token,
     revoke_access_token,
+    revoke_all_sessions,
 )
 from app.config import settings
 from app.contracts import LoginRequest, UserCreate
@@ -344,3 +345,101 @@ async def test_create_new_user_assigns_user_role(db_session):
     ).all()
 
     assert set(role_names) == {AppRole.USER.value}
+
+
+async def _login(db, email="user@example.com"):
+    return await login(
+        db,
+        LoginRequest(email=email, password="s3cret!"),
+        make_request(),
+    )
+
+
+async def _token_rows(db, user_id):
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.user_id == user_id)
+    )
+    return result.scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_sessions_marks_every_row_and_clears_redis(
+    db_session, redis_client
+):
+    user = await _make_user(db_session)
+    await _login(db_session)
+    await _login(db_session)
+
+    await revoke_all_sessions(db_session, user.id)
+
+    rows = await _token_rows(db_session, user.id)
+    assert len(rows) == 2
+    for row in rows:
+        await db_session.refresh(row)
+        assert row.is_revoked is True
+        assert row.revoke_reason == RevokeReasonEnum.logout_all
+        assert row.revoked_at is not None
+
+    assert len(await redis_client.smembers(f"user_sessions:{user.id}")) == 0
+    assert await redis_client.get(f"user_revoked_at:{user.id}") is not None
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_sessions_leaves_other_users_untouched(db_session):
+    user = await _make_user(db_session, email="a@example.com")
+    other = await _make_user(db_session, email="b@example.com")
+    await _login(db_session, "a@example.com")
+    await _login(db_session, "b@example.com")
+
+    await revoke_all_sessions(db_session, user.id)
+
+    for row in await _token_rows(db_session, other.id):
+        await db_session.refresh(row)
+        assert row.is_revoked is False
+        assert row.revoke_reason is None
+        assert row.revoked_at is None
+
+
+@pytest.mark.asyncio
+async def test_revoke_all_sessions_keeps_original_reason_on_revoked_rows(db_session):
+    user = await _make_user(db_session)
+    first = await _login(db_session)
+    await _login(db_session)
+    await logout(db_session, first.refresh_token)
+
+    await revoke_all_sessions(db_session, user.id)
+
+    first_row = (
+        (
+            await db_session.execute(
+                select(RefreshToken).where(
+                    RefreshToken.token_hash == _hash_refresh_token(first.refresh_token)
+                )
+            )
+        )
+        .scalars()
+        .one()
+    )
+    await db_session.refresh(first_row)
+    assert first_row.revoke_reason == RevokeReasonEnum.logout
+
+    reasons = {row.revoke_reason for row in await _token_rows(db_session, user.id)}
+    assert reasons == {RevokeReasonEnum.logout, RevokeReasonEnum.logout_all}
+
+
+@pytest.mark.asyncio
+async def test_token_reuse_marks_db_rows_with_token_reuse_reason(db_session):
+    user = await _make_user(db_session)
+    tokens = await _login(db_session)
+    await refresh_token(db_session, tokens.refresh_token, make_request())
+
+    with pytest.raises(HTTPException):
+        await refresh_token(db_session, tokens.refresh_token, make_request())
+
+    rows = await _token_rows(db_session, user.id)
+    assert len(rows) == 2
+    for row in rows:
+        await db_session.refresh(row)
+        assert row.is_revoked is True
+    reasons = {row.revoke_reason for row in rows}
+    assert reasons == {RevokeReasonEnum.rotated, RevokeReasonEnum.token_reuse}

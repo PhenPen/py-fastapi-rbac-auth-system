@@ -1,5 +1,6 @@
 """End-to-end auth flow: tokens from a real login must satisfy RolesGuard."""
 
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -60,6 +61,7 @@ async def test_admin_login_token_reaches_guarded_routes(client, db_session):
         headers=headers,
     )
     assert created.status_code == 201
+    assert created.json()["roles"] == [AppRole.USER.value]
 
 
 @pytest.mark.asyncio
@@ -77,8 +79,7 @@ async def test_missing_and_revoked_tokens_are_rejected(client, db_session):
         == 200
     )
 
-    # Same "logout-all" path the sessions endpoint will use in #12.
-    await token_store.revoke_user_sessions(str(user.id), access_token_ttl=1800)
+    await token_store.revoke_user_sessions(str(user.id))
 
     revoked = client.get(f"{settings.API_V1_STR}/admin/dashboard", headers=headers)
     assert revoked.status_code == 401
@@ -135,3 +136,57 @@ async def test_logout_without_access_token_still_revokes_refresh(client, db_sess
         json={"refreshToken": tokens["refreshToken"]},
     )
     assert replay.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_all_ends_every_session(client, db_session):
+    await _create_verified_user(db_session, "admin@example.com", AppRole.ADMIN)
+    first = _login_response(client, "admin@example.com")
+    second = _login_response(client, "admin@example.com")
+    dashboard = f"{settings.API_V1_STR}/admin/dashboard"
+    first_headers = {"Authorization": f"Bearer {first['accessToken']}"}
+    second_headers = {"Authorization": f"Bearer {second['accessToken']}"}
+
+    assert client.get(dashboard, headers=first_headers).status_code == 200
+    assert client.get(dashboard, headers=second_headers).status_code == 200
+
+    out = client.post(f"{settings.API_V1_STR}/auth/logout-all", headers=first_headers)
+    assert out.status_code == 204
+
+    # Both access tokens are dead, not only the one used for the call.
+    assert client.get(dashboard, headers=first_headers).status_code == 401
+    assert client.get(dashboard, headers=second_headers).status_code == 401
+
+    # Both refresh tokens are dead too.
+    for tokens in (first, second):
+        replay = client.post(
+            f"{settings.API_V1_STR}/auth/refresh",
+            json={"refreshToken": tokens["refreshToken"]},
+        )
+        assert replay.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_logout_all_requires_authentication(client):
+    out = client.post(f"{settings.API_V1_STR}/auth/logout-all")
+    assert out.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_login_after_logout_all_works(client, db_session):
+    await _create_verified_user(db_session, "admin@example.com", AppRole.ADMIN)
+    headers = _login(client, "admin@example.com")
+    assert (
+        client.post(
+            f"{settings.API_V1_STR}/auth/logout-all", headers=headers
+        ).status_code
+        == 204
+    )
+
+    # Token times are whole seconds, so a login in the same second as the
+    # revocation would be rejected. Wait it out.
+    time.sleep(1.1)
+
+    fresh = _login(client, "admin@example.com")
+    dashboard = client.get(f"{settings.API_V1_STR}/admin/dashboard", headers=fresh)
+    assert dashboard.status_code == 200
